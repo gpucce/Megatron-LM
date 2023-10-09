@@ -65,17 +65,39 @@ def load_args_from_checkpoint(args):
 
 def set_preprocess_state(args, model, hf_model):
     '''Set embedding params.'''
-    model.language_model.embedding.word_embeddings.weight.data.copy_(
-        hf_model.model.embed_tokens.weight)
+    try:
+        model.language_model.embedding.word_embeddings.weight.data.copy_(
+            hf_model.model.embed_tokens.weight.to(torch.device("cpu"))
+        )
+    except:
+        model.language_model.embedding.word_embeddings.weight.data.copy_(
+            hf_model.model.embed_tokens._hf_hook.weights_map.dataset[
+                "model.embed_tokens.weight"
+            ].to(torch.device("cpu"))
+        )
 
 
 def set_postprocess_state(args, model, hf_model):
     '''Set output layer & norm params.'''
-    model.language_model.encoder.final_norm.weight.data.copy_(hf_model.model.norm.weight)
-    model.language_model.output_layer.weight.data.copy_(hf_model.lm_head.weight)
+    try:
+        model.language_model.encoder.final_norm.weight.data.copy_(
+            hf_model.model.norm.weight.to(torch.device("cpu"))
+        )
+    except:
+        model.language_model.encoder.final_norm.weight.data.copy_(
+            hf_model.model.norm._hf_hook.weights_map.dataset["model.norm.weight"].to(torch.device("cpu"))
+        )
+    try:
+        model.language_model.output_layer.weight.data.copy_(
+            hf_model.lm_head.weight.to(torch.device("cpu"))
+        )
+    except:
+        model.language_model.output_layer.weight.data.copy_(
+            hf_model.lm_head._hf_hook.weights_map.dataset["lm_head.weight"].to(torch.device("cpu"))
+        )
 
 
-def set_attn_state(args, layer, hf_layer):
+def set_attn_state(args, layer, hf_layer, layer_idx):
     '''Set self-attention params.'''
 
     # Get attention layer & state.
@@ -91,25 +113,58 @@ def set_attn_state(args, layer, hf_layer):
     assert nh % ng == 0
 
     # Copy weights (re-order dimensions for Megatron).
-    attn.query_key_value.weight.data.copy_(torch.cat([ 
-        hf_attn.q_proj.weight.reshape((ng, dim*nh//ng, -1)),
-        hf_attn.k_proj.weight.reshape((ng, dim, -1)),
-        hf_attn.v_proj.weight.reshape((ng, dim, -1)),
-    ], dim=1).reshape((-1, args.hidden_size)))
-    attn.dense.weight.data.copy_(hf_attn.o_proj.weight)
+    try:
+        t1 = hf_attn.q_proj.weight.reshape((ng, dim*nh//ng, -1)).to(torch.device("cpu"))
+    except:
+        t1 = hf_attn.q_proj._hf_hook.weights_map.dataset[f"model.layers.{layer_idx}.self_attn.q_proj.weight"].reshape((ng, dim*nh//ng, -1)).to(torch.device("cpu"))
+
+    try:
+        t2 = hf_attn.k_proj.weight.reshape((ng, dim, -1)).to(torch.device("cpu"))
+    except:
+        t2 = hf_attn.q_proj._hf_hook.weights_map.dataset[f"model.layers.{layer_idx}.self_attn.k_proj.weight"].reshape((ng, dim, -1)).to(torch.device("cpu"))
+
+    try:
+        t3 = hf_attn.v_proj.weight.reshape((ng, dim, -1)).to(torch.device("cpu"))
+    except:
+        t3 = hf_attn.q_proj._hf_hook.weights_map.dataset[f"model.layers.{layer_idx}.self_attn.v_proj.weight"].reshape((ng, dim, -1)).to(torch.device("cpu"))
+
+    attn.query_key_value.weight.data.copy_(
+        torch.cat([t1,t2,t3], dim=1).reshape((-1, args.hidden_size))
+    )
+
+    try: 
+        attn.dense.weight.data.copy_(hf_attn.o_proj.weight.to(torch.device("cpu")))
+    except:
+        attn.dense.weight.data.copy_(
+            hf_attn.o_proj._hf_hook.weights_map.dataset[f"model.layers.{layer_idx}.self_attn.o_proj.weight"].to(torch.device("cpu"))
+        )
 
 
-def set_mlp_state(args, layer, hf_layer):
+def set_mlp_state(args, layer, hf_layer, layer_idx):
     '''Set MLP params.'''
 
     mlp = layer.mlp
     hf_mlp = hf_layer.mlp
 
-    mlp.dense_h_to_4h.weight.data.copy_(torch.cat([
-        hf_mlp.gate_proj.weight,
-        hf_mlp.up_proj.weight,
-    ], dim=0))
-    mlp.dense_4h_to_h.weight.data.copy_(hf_mlp.down_proj.weight)
+
+    try:
+        t1 = hf_mlp.gate_proj.weight.to(torch.device("cpu"))
+    except:
+        t1 = hf_mlp.gate_proj._hf_hook.weights_map.dataset[f"model.layers.{layer_idx}.mlp.gate_proj.weight"].to(torch.device("cpu"))
+
+    try:
+        t2 = hf_mlp.up_proj.weight.to(torch.device("cpu"))
+    except:
+        t2 = hf_mlp.up_proj._hf_hook.weights_map.dataset[f"model.layers.{layer_idx}.mlp.up_proj.weight"].to(torch.device("cpu"))
+        
+    mlp.dense_h_to_4h.weight.data.copy_(torch.cat([t1, t2], dim=0))
+    
+    try:
+        mlp.dense_4h_to_h.weight.data.copy_(hf_mlp.down_proj.weight.to(torch.device("cpu")))
+    except:
+        mlp.dense_4h_to_h.weight.data.copy_(
+            hf_mlp.down_proj._hf_hook.weights_map.dataset[f"model.layers.{layer_idx}.mlp.down_proj.weight"].to(torch.device("cpu"))
+        )
 
 
 def set_layer_state(args, model, hf_model, layer_idx):
@@ -118,20 +173,46 @@ def set_layer_state(args, model, hf_model, layer_idx):
     layer = model.language_model.encoder.layers[layer_idx]
     hf_layer = hf_model.model.layers[layer_idx]
 
-    set_attn_state(args, layer, hf_layer)
-    set_mlp_state(args, layer, hf_layer)
-    layer.input_norm.weight.data.copy_(hf_layer.input_layernorm.weight)
-    layer.post_attention_norm.weight.data.copy_(hf_layer.post_attention_layernorm.weight)
+    set_attn_state(args, layer, hf_layer, layer_idx)
+    set_mlp_state(args, layer, hf_layer, layer_idx)
+    try:
+        layer.input_norm.weight.data.copy_(hf_layer.input_layernorm.weight.to(torch.device("cpu")))
+    except:
+        layer.input_norm.weight.data.copy_(
+            hf_layer.input_layernorm._hf_hook.weights_map.dataset[f"model.layers.{layer_idx}.input_layernorm.weight"].to(torch.device("cpu"))
+        )
+    
+    try:
+        layer.post_attention_norm.weight.data.copy_(hf_layer.post_attention_layernorm.weight.to(torch.device("cpu")))
+    except:
+        layer.post_attention_norm.weight.data.copy_(
+            hf_layer.post_attention_layernorm._hf_hook.weights_map.dataset[f"model.layers.{layer_idx}.post_attention_layernorm.weight"].to(torch.device("cpu"))
+        )
 
 
 def load_checkpoint_to_model(args):
     '''Set model params.'''
 
-    from pretrain_gpt import model_provider
-    from transformers import LlamaForCausalLM
+    # failed attempt to load HF model with accelerate
+    from transformers import LlamaForCausalLM, LlamaConfig, AutoModelForCausalLM
+    from accelerate import infer_auto_device_map, init_empty_weights, load_checkpoint_and_dispatch
 
-    # Load Huggingface model.
-    hf_model = LlamaForCausalLM.from_pretrained(args.load, device_map="cpu")
+    cfg = LlamaConfig.from_pretrained(args.load)
+    with init_empty_weights():
+        hf_model = AutoModelForCausalLM.from_config(cfg, torch_dtype=torch.float16)
+    device_map = infer_auto_device_map(hf_model, max_memory={0: "20GiB", "cpu": "30GiB"})
+    # LlamaForCausalLM.from_pretrained(args.load, device_map="cpu")
+    hf_model = load_checkpoint_and_dispatch(
+        hf_model, args.load, device_map=device_map, no_split_module_classes=["LlamaDecoderLayer"],
+        offload_folder="/leonardo_scratch/large/userexternal/gpuccett/models/llama_2_hf/offload_model"
+    )
+
+
+    from pretrain_gpt import model_provider
+    # from transformers import LlamaForCausalLM
+
+    # # Load Huggingface model.
+    # hf_model = LlamaForCausalLM.from_pretrained(args.load, device_map="cpu")
 
     # Init Megatron model.
     model = model_provider(True, True).to(args.params_dtype)
